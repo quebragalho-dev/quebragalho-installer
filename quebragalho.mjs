@@ -118,7 +118,9 @@ async function configuration(harness, base, model, models) {
         await mkdir(env.OPENCODE_CONFIG_DIR);
         delete env.OPENCODE_CONFIG;
         const existing = env.OPENCODE_CONFIG_CONTENT ? JSON.parse(env.OPENCODE_CONFIG_CONTENT) : {};
-        env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...existing, model: `quebragalho/${model}`,
+        if (Array.isArray(existing.enabled_providers) && !existing.enabled_providers.includes('quebragalho')) existing.enabled_providers.push('quebragalho');
+        if (Array.isArray(existing.disabled_providers)) existing.disabled_providers = existing.disabled_providers.filter(id => id !== 'quebragalho');
+        env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...existing, model: `quebragalho/${model}`, small_model: `quebragalho/${model}`,
           provider: { ...existing.provider, quebragalho: { name: 'Quebra-galho', npm: '@ai-sdk/openai-compatible',
             options: { baseURL: `${base}/v1`, apiKey: '{env:QUEBRAGALHO_API_KEY}' },
             models: Object.fromEntries(models.map(id => [id, { name: id }])) } } });

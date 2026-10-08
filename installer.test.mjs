@@ -200,6 +200,49 @@ test('installer and installed launch preserve arguments, environment and failure
   }
 });
 
+test('OpenCode and T3 preserve settings while allowing QG and selecting its auxiliary model', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'quebragalho-routing-test-'));
+  try {
+    const preload = join(dir, 'transport.mjs');
+    await writeFile(preload, `globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: 'qg-model' }] }));`);
+    const driver = `#!/usr/bin/env node
+      const assert = require('node:assert/strict');
+      const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
+      const expected = JSON.parse(process.env.EXPECTED_CONFIG);
+      assert.equal(config.model, 'quebragalho/qg-model');
+      assert.equal(config.small_model, 'quebragalho/qg-model');
+      for (const name of ['enabled_providers', 'disabled_providers']) {
+        assert.equal(Object.hasOwn(config, name), Object.hasOwn(expected, name));
+        assert.deepEqual(config[name], expected[name]);
+      }
+      assert.deepEqual(config.provider.official, { name: 'Official', options: { baseURL: 'https://official.example' } });
+      assert.equal(config.theme, 'preserved');
+      assert.deepEqual(config.permission, { edit: 'ask' });
+    `;
+    for (const harness of ['opencode', 't3']) await writeFile(join(dir, harness), driver, { mode: 0o755 });
+    const env = { QUEBRAGALHO_BASE_URL: 'https://gateway.example', QUEBRAGALHO_API_KEY: 'test-secret',
+      NODE_OPTIONS: `--import=${preload}`, PATH: `${dir}:${process.env.PATH}` };
+    for (const [filters, expected] of [
+      [{ enabled_providers: ['official'] }, { enabled_providers: ['official', 'quebragalho'] }],
+      [{ disabled_providers: ['quebragalho', 'blocked', 'quebragalho'] }, { disabled_providers: ['blocked'] }],
+      [{ enabled_providers: ['official'], disabled_providers: ['quebragalho', 'blocked', 'quebragalho'] },
+        { enabled_providers: ['official', 'quebragalho'], disabled_providers: ['blocked'] }],
+      [{ enabled_providers: ['official', 'quebragalho'] }, { enabled_providers: ['official', 'quebragalho'] }],
+      [{}, {}],
+    ]) {
+      for (const harness of ['opencode', 't3']) {
+        const result = await run('node', ['quebragalho.mjs', 'launch', harness, '--model', 'qg-model'], {
+          ...env, EXPECTED_CONFIG: JSON.stringify(expected),
+          OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...filters, small_model: 'official/title-model',
+            provider: { official: { name: 'Official', options: { baseURL: 'https://official.example' } } },
+            theme: 'preserved', permission: { edit: 'ask' } }),
+        });
+        assert.equal(result.code, 0, result.output);
+      }
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('Claude setup uses an isolated profile and leaves official models and providers intact', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'quebragalho-setup-test-'));
   try {
