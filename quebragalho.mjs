@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import { Writable } from 'node:stream';
 import { createHash } from 'node:crypto';
 
-const harnesses = ['claude', 'codex', 'opencode', 'aider', 'pi'];
+const harnesses = ['claude', 'codex', 'opencode', 'aider', 'pi', 't3'];
 const claudeProfile = () => join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'quebragalho', 'claude');
 
 async function gatewayCatalog(rawUrl, key) {
@@ -112,16 +112,40 @@ async function configuration(harness, base, model, models) {
           ['-c', `model_providers.quebragalho.${name}=${JSON.stringify(value)}`]), '--model', model];
         break;
       }
-      case 'opencode': {
+      case 'opencode':
+      case 't3': {
         env.OPENCODE_CONFIG_DIR = join(temporary, 'opencode');
         await mkdir(env.OPENCODE_CONFIG_DIR);
         delete env.OPENCODE_CONFIG;
         const existing = env.OPENCODE_CONFIG_CONTENT ? JSON.parse(env.OPENCODE_CONFIG_CONTENT) : {};
-        env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...existing, model: `quebragalho/${model}`,
+        if (Array.isArray(existing.enabled_providers) && !existing.enabled_providers.includes('quebragalho')) existing.enabled_providers.push('quebragalho');
+        if (Array.isArray(existing.disabled_providers)) existing.disabled_providers = existing.disabled_providers.filter(id => id !== 'quebragalho');
+        env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...existing, model: `quebragalho/${model}`, small_model: `quebragalho/${model}`,
           provider: { ...existing.provider, quebragalho: { name: 'Quebra-galho', npm: '@ai-sdk/openai-compatible',
             options: { baseURL: `${base}/v1`, apiKey: '{env:QUEBRAGALHO_API_KEY}' },
             models: Object.fromEntries(models.map(id => [id, { name: id }])) } } });
-        args = ['--model', `quebragalho/${model}`];
+        if (harness === 'opencode') {
+          args = ['--model', `quebragalho/${model}`];
+          break;
+        }
+        // T3 runs as a foreground server; the model comes from the private seed, never --model.
+        for (const name of Object.keys(env)) if (name.startsWith('T3CODE_')) delete env[name];
+        const t3home = join(temporary, 't3');
+        env.T3CODE_HOME = t3home;
+        // ponytail: T3 support rides on its native OpenCode driver; if T3 gains a first-party gateway provider, seed that instead.
+        let binaryPath;
+        try { binaryPath = execFileSync('sh', ['-c', 'command -v opencode'], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+        catch { throw new Error('T3 requer OpenCode instalado no PATH.'); }
+        const seed = { providers: { codex: { enabled: false }, claudeAgent: { enabled: false },
+          opencode: { enabled: true, binaryPath, customModels: models.map(id => `quebragalho/${id}`) } },
+          defaultModelSelection: { instanceId: 'opencode', model: `quebragalho/${model}` },
+          textGenerationModelSelection: { instanceId: 'opencode', model: `quebragalho/${model}` },
+          sourceControlWriterModelSelection: { instanceId: 'opencode', model: `quebragalho/${model}` } };
+        try {
+          await mkdir(join(t3home, 'userdata'), { recursive: true });
+          await writeFile(join(t3home, 'userdata', 'settings.json'), `${JSON.stringify(seed)}\n`, { mode: 0o600 });
+        } catch (error) { await rm(temporary, { recursive: true, force: true }); throw error; }
+        args = ['start', '--base-dir', t3home, '--host', '127.0.0.1'];
         break;
       }
       case 'aider':

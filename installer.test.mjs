@@ -33,7 +33,7 @@ test('installer and installed launch preserve arguments, environment and failure
           {status: Number(process.env.MOCK_STATUS || 200)});
       };
     `);
-    const officialFiles = ['.claude/settings.json', '.codex/config.toml', '.config/opencode/opencode.json', '.aider.conf.yml', '.pi/agent/models.json'];
+    const officialFiles = ['.claude/settings.json', '.codex/config.toml', '.config/opencode/opencode.json', '.aider.conf.yml', '.pi/agent/models.json', '.t3/userdata/settings.json'];
     for (const file of officialFiles) {
       const path = join(dir, 'home', file);
       await mkdir(join(path, '..'), { recursive: true });
@@ -42,6 +42,8 @@ test('installer and installed launch preserve arguments, environment and failure
     const capture = join(dir, 'capture.json');
     const fake = `#!/usr/bin/env node\nconst fs = require('node:fs'); const args=process.argv.slice(2); const extension=args.includes('--extension') ? args[args.indexOf('--extension')+1] : undefined; fs.writeFileSync(process.env.CAPTURE, JSON.stringify({args,configDir:process.env.CLAUDE_CONFIG_DIR,home:process.env.HOME,codexHome:process.env.CODEX_HOME,opencodeDir:process.env.OPENCODE_CONFIG_DIR,opencodeFile:process.env.OPENCODE_CONFIG,piDir:process.env.PI_CODING_AGENT_DIR,xdgConfig:process.env.XDG_CONFIG_HOME,xdgData:process.env.XDG_DATA_HOME,base:process.env.ANTHROPIC_BASE_URL,token:process.env.ANTHROPIC_AUTH_TOKEN,api:process.env.ANTHROPIC_API_KEY,discovery:process.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY,bedrock:process.env.CLAUDE_CODE_USE_BEDROCK,openaiBase:process.env.OPENAI_API_BASE,openaiKey:process.env.OPENAI_API_KEY,opencode:process.env.OPENCODE_CONFIG_CONTENT,extension:extension ? fs.readFileSync(extension,'utf8') : undefined}));if(process.env.MOCK_SIGNAL) process.kill(process.pid,'SIGTERM'); else if(process.env.MOCK_WAIT) setInterval(()=>{},1000); else process.exit(7);\n`;
     for (const name of ['claude', 'codex', 'opencode', 'aider', 'pi']) await writeFile(join(dir, name), fake, { mode: 0o755 });
+    const fakeT3 = `#!/usr/bin/env node\nconst fs=require('node:fs');const args=process.argv.slice(2);const at=args.indexOf('--base-dir');const baseDir=at<0?undefined:args[at+1];let settings;try{settings=fs.readFileSync(baseDir+'/userdata/settings.json','utf8')}catch{}fs.writeFileSync(process.env.CAPTURE,JSON.stringify({args,home:process.env.HOME,xdgConfig:process.env.XDG_CONFIG_HOME,xdgData:process.env.XDG_DATA_HOME,opencodeDir:process.env.OPENCODE_CONFIG_DIR,opencodeFile:process.env.OPENCODE_CONFIG,opencode:process.env.OPENCODE_CONFIG_CONTENT,t3Home:process.env.T3CODE_HOME,t3Port:process.env.T3CODE_PORT,t3Host:process.env.T3CODE_HOST,baseDir,settings}));if(process.env.MOCK_SIGNAL)process.kill(process.pid,'SIGTERM');else if(process.env.MOCK_WAIT)setInterval(()=>{},1000);else process.exit(7);\n`;
+    await writeFile(join(dir, 't3'), fakeT3, { mode: 0o755 });
     const env = { HOME: join(dir, 'home'), QUEBRAGALHO_BIN_DIR: dir, PATH: `${dir}:${process.env.PATH}`, CAPTURE: capture,
       NODE_OPTIONS: `--import=${preload}`, QUEBRAGALHO_BASE_URL: 'https://gateway.example', QUEBRAGALHO_API_KEY: 'test-secret', CLAUDE_CODE_USE_BEDROCK: '1', CODEX_HOME: '/official/codex', OPENCODE_CONFIG_DIR: '/official/opencode', OPENCODE_CONFIG: '/official/opencode.json', PI_CODING_AGENT_DIR: '/official/pi',
       ANTHROPIC_BASE_URL: '', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_API_KEY: '', ANTHROPIC_MODEL: '',
@@ -59,7 +61,7 @@ test('installer and installed launch preserve arguments, environment and failure
     await rm(installed);
     assert.equal((await run('sh', ['install.sh'], env)).code, 0);
     assert.equal((await run(installed, ['--help'], env)).code, 0);
-    assert.deepEqual((await run(installed, ['list'], env)).output.trim().split('\n'), ['claude', 'codex', 'opencode', 'aider', 'pi']);
+    assert.deepEqual((await run(installed, ['list'], env)).output.trim().split('\n'), ['claude', 'codex', 'opencode', 'aider', 'pi', 't3']);
     const result = await run(installed, ['launch', 'claude', '--model', 'model-b', '--', '-p', 'hello world; $(echo nope)'], env);
     assert.equal(result.code, 7);
     const claude = JSON.parse(await readFile(capture, 'utf8'));
@@ -73,8 +75,9 @@ test('installer and installed launch preserve arguments, environment and failure
     await assert.rejects(stat(claude.configDir), { code: 'ENOENT' });
     assert.equal((await run(installed, ['launch', 'claude', '--model', 'model-b', '--', '--help'], env)).code, 7);
     assert.deepEqual(JSON.parse(await readFile(capture, 'utf8')).args, ['--model', 'model-b', '--help']);
-    for (const harness of ['codex', 'opencode', 'aider', 'pi']) {
-      const launchEnv = harness === 'opencode' ? { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { official: { name: 'Official provider' } }, theme: 'existing' }) } : env;
+    for (const harness of ['codex', 'opencode', 'aider', 'pi', 't3']) {
+      const launchEnv = harness === 'opencode' || harness === 't3' ? { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { official: { name: 'Official provider' } }, theme: 'existing' }) } : env;
+      if (harness === 't3') Object.assign(launchEnv, { T3CODE_PORT: '9999', T3CODE_HOST: '0.0.0.0', T3CODE_HOME: '/official/t3' });
       const outcome = await run(installed, ['launch', harness, '--model', 'model-b', '--', '--help'], launchEnv);
       assert.equal(outcome.code, 7, outcome.output);
       const captured = JSON.parse(await readFile(capture, 'utf8'));
@@ -117,6 +120,36 @@ test('installer and installed launch preserve arguments, environment and failure
         assert.equal(provider.models.length, 2);
         await assert.rejects(readFile(captured.args[1]), { code: 'ENOENT' });
       }
+      if (harness === 't3') {
+        assert.deepEqual(captured.args.slice(0, 4), ['start', '--base-dir', captured.baseDir, '--host']);
+        assert.equal(captured.args[4], '127.0.0.1');
+        assert.equal(captured.args.at(-1), '--help');
+        assert.ok(!captured.args.includes('--model'));
+        assert.ok(!captured.args.includes('--port'));
+        assert.ok(captured.baseDir.startsWith(captured.home + '/'));
+        assert.equal(captured.t3Home, captured.baseDir);
+        assert.equal(captured.t3Port, undefined);
+        assert.equal(captured.t3Host, undefined);
+        assert.ok(captured.opencodeDir.startsWith(captured.home + '/'));
+        assert.equal(captured.opencodeFile, undefined);
+        const t3config = JSON.parse(captured.opencode);
+        assert.deepEqual(t3config.provider.official, { name: 'Official provider' });
+        assert.deepEqual(Object.keys(t3config.provider.quebragalho.models), ['model-a', 'model-b']);
+        assert.equal(t3config.provider.quebragalho.options.baseURL, 'https://gateway.example/v1');
+        assert.equal(t3config.provider.quebragalho.options.apiKey, '{env:QUEBRAGALHO_API_KEY}');
+        const seed = JSON.parse(captured.settings);
+        assert.equal(seed.providers.opencode.enabled, true);
+        assert.equal(seed.providers.opencode.binaryPath, join(dir, 'opencode'));
+        assert.deepEqual(seed.providers.opencode.customModels, ['quebragalho/model-a', 'quebragalho/model-b']);
+        assert.equal(seed.providers.codex.enabled, false);
+        assert.equal(seed.providers.claudeAgent.enabled, false);
+        for (const selection of [seed.defaultModelSelection, seed.textGenerationModelSelection, seed.sourceControlWriterModelSelection]) {
+          assert.equal(selection.instanceId, 'opencode');
+          assert.equal(selection.model, 'quebragalho/model-b');
+        }
+        assert.ok(!captured.settings.includes('test-secret'));
+        await assert.rejects(stat(captured.baseDir), { code: 'ENOENT' });
+      }
     }
     const signaled = await run(installed, ['launch', 'pi', '--model', 'model-b'], { ...env, MOCK_SIGNAL: '1' });
     assert.equal(signaled.signal, 'SIGTERM');
@@ -140,6 +173,11 @@ test('installer and installed launch preserve arguments, environment and failure
     } finally { running.kill('SIGKILL'); }
     await rm(join(dir, 'pi'));
     assert.equal((await run(installed, ['launch', 'pi', '--model', 'model-b'], env)).code, 1);
+    const t3signaled = await run(installed, ['launch', 't3', '--model', 'model-b'], { ...env, MOCK_SIGNAL: '1' });
+    assert.equal(t3signaled.signal, 'SIGTERM');
+    await assert.rejects(stat(JSON.parse(await readFile(capture, 'utf8')).baseDir), { code: 'ENOENT' });
+    await rm(join(dir, 't3'));
+    assert.equal((await run(installed, ['launch', 't3', '--model', 'model-b'], env)).code, 1);
     for (const [args, overrides] of [
       [['launch', 'claude'], {}],
       [['launch', 'claude', '--model', 'missing'], {}],
@@ -160,6 +198,49 @@ test('installer and installed launch preserve arguments, environment and failure
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('OpenCode and T3 preserve settings while allowing QG and selecting its auxiliary model', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'quebragalho-routing-test-'));
+  try {
+    const preload = join(dir, 'transport.mjs');
+    await writeFile(preload, `globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: 'qg-model' }] }));`);
+    const driver = `#!/usr/bin/env node
+      const assert = require('node:assert/strict');
+      const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
+      const expected = JSON.parse(process.env.EXPECTED_CONFIG);
+      assert.equal(config.model, 'quebragalho/qg-model');
+      assert.equal(config.small_model, 'quebragalho/qg-model');
+      for (const name of ['enabled_providers', 'disabled_providers']) {
+        assert.equal(Object.hasOwn(config, name), Object.hasOwn(expected, name));
+        assert.deepEqual(config[name], expected[name]);
+      }
+      assert.deepEqual(config.provider.official, { name: 'Official', options: { baseURL: 'https://official.example' } });
+      assert.equal(config.theme, 'preserved');
+      assert.deepEqual(config.permission, { edit: 'ask' });
+    `;
+    for (const harness of ['opencode', 't3']) await writeFile(join(dir, harness), driver, { mode: 0o755 });
+    const env = { QUEBRAGALHO_BASE_URL: 'https://gateway.example', QUEBRAGALHO_API_KEY: 'test-secret',
+      NODE_OPTIONS: `--import=${preload}`, PATH: `${dir}:${process.env.PATH}` };
+    for (const [filters, expected] of [
+      [{ enabled_providers: ['official'] }, { enabled_providers: ['official', 'quebragalho'] }],
+      [{ disabled_providers: ['quebragalho', 'blocked', 'quebragalho'] }, { disabled_providers: ['blocked'] }],
+      [{ enabled_providers: ['official'], disabled_providers: ['quebragalho', 'blocked', 'quebragalho'] },
+        { enabled_providers: ['official', 'quebragalho'], disabled_providers: ['blocked'] }],
+      [{ enabled_providers: ['official', 'quebragalho'] }, { enabled_providers: ['official', 'quebragalho'] }],
+      [{}, {}],
+    ]) {
+      for (const harness of ['opencode', 't3']) {
+        const result = await run('node', ['quebragalho.mjs', 'launch', harness, '--model', 'qg-model'], {
+          ...env, EXPECTED_CONFIG: JSON.stringify(expected),
+          OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...filters, small_model: 'official/title-model',
+            provider: { official: { name: 'Official', options: { baseURL: 'https://official.example' } } },
+            theme: 'preserved', permission: { edit: 'ask' } }),
+        });
+        assert.equal(result.code, 0, result.output);
+      }
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('Claude setup uses an isolated profile and leaves official models and providers intact', async () => {
