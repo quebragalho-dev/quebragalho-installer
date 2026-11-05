@@ -193,3 +193,10 @@ test('conta do login depende da URL base: a chave oficial nunca é enviada a out
   assert.equal(loginAccount('https://a.dev'), loginAccount('https://a.dev'));
   assert.match(loginAccount('https://a.dev'), /^login-[0-9a-f]{32}$/);
 });
+
+test('Given PowerShell 7 no PATH Then os scripts do DPAPI não dependem de cmdlets de módulo', () => {
+  for (const script of [DPAPI_PROTECT, DPAPI_UNPROTECT]) {
+    assert.doesNotMatch(script, /SecureString/);
+    assert.match(script, /ProtectedData/);
+  }
+});
