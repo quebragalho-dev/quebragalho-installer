@@ -1,271 +1,289 @@
+// Ponta a ponta: instaladores (clone, curl | sh, reinstalação) e o launcher instalado, com a rede simulada.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, rm, symlink, readlink, readdir, stat, mkdir } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, symlink, readlink, readdir, stat, mkdir, cp, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-function run(command, args, env) {
+const REPO = dirname(fileURLToPath(import.meta.url));
+const HARNESSES = ['claude', 'codex', 'opencode', 'aider', 'pi'];
+const POSIX = { skip: process.platform === 'win32' && 'usa sh e launchers POSIX' };
+const DASHES = [String.fromCharCode(0x2013), String.fromCharCode(0x2014)];
+
+function run(command, args, env, { input, cwd } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { env: { ...process.env, ...env }, cwd, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     let output = '';
     child.stdout.on('data', data => output += data);
     child.stderr.on('data', data => output += data);
     child.on('error', reject);
     child.on('close', (code, signal) => resolve({ code, signal, output }));
+    if (input !== undefined) child.stdin.end(input);
   });
 }
 
-test('installer and installed launch preserve arguments, environment and failures', async () => {
+async function installDirs() {
   const dir = await mkdtemp(join(tmpdir(), 'quebragalho-test-'));
-  try {
-    // Mock only transport: execute the actual installed launcher and child binaries.
-    const preload = join(dir, 'transport.mjs');
-    await writeFile(preload, `
-      import assert from 'node:assert/strict';
-      globalThis.fetch = async (url, options) => {
-        assert.equal(url, 'https://gateway.example/v1/models');
-        assert.equal(options.headers.Authorization, 'Bearer test-secret');
-        assert.equal(options.redirect, 'error');
-        assert.ok(options.signal);
-        if (process.env.MOCK_NETWORK_ERROR) throw new TypeError('test-secret');
-        return new Response(process.env.MOCK_BODY || JSON.stringify({data:[{id:'model-a'},{id:'model-b'}]}),
-          {status: Number(process.env.MOCK_STATUS || 200)});
-      };
-    `);
-    const officialFiles = ['.claude/settings.json', '.codex/config.toml', '.config/opencode/opencode.json', '.aider.conf.yml', '.pi/agent/models.json'];
-    for (const file of officialFiles) {
-      const path = join(dir, 'home', file);
-      await mkdir(join(path, '..'), { recursive: true });
-      await writeFile(path, 'official-provider-and-model');
-    }
-    const capture = join(dir, 'capture.json');
-    const fake = `#!/usr/bin/env node\nconst fs = require('node:fs'); const args=process.argv.slice(2); const extension=args.includes('--extension') ? args[args.indexOf('--extension')+1] : undefined; fs.writeFileSync(process.env.CAPTURE, JSON.stringify({args,configDir:process.env.CLAUDE_CONFIG_DIR,home:process.env.HOME,codexHome:process.env.CODEX_HOME,opencodeDir:process.env.OPENCODE_CONFIG_DIR,opencodeFile:process.env.OPENCODE_CONFIG,piDir:process.env.PI_CODING_AGENT_DIR,xdgConfig:process.env.XDG_CONFIG_HOME,xdgData:process.env.XDG_DATA_HOME,base:process.env.ANTHROPIC_BASE_URL,token:process.env.ANTHROPIC_AUTH_TOKEN,api:process.env.ANTHROPIC_API_KEY,discovery:process.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY,bedrock:process.env.CLAUDE_CODE_USE_BEDROCK,openaiBase:process.env.OPENAI_API_BASE,openaiKey:process.env.OPENAI_API_KEY,opencode:process.env.OPENCODE_CONFIG_CONTENT,extension:extension ? fs.readFileSync(extension,'utf8') : undefined}));if(process.env.MOCK_SIGNAL) process.kill(process.pid,'SIGTERM'); else if(process.env.MOCK_WAIT) setInterval(()=>{},1000); else process.exit(7);\n`;
-    for (const name of ['claude', 'codex', 'opencode', 'aider', 'pi']) await writeFile(join(dir, name), fake, { mode: 0o755 });
-    const env = { HOME: join(dir, 'home'), QUEBRAGALHO_BIN_DIR: dir, PATH: `${dir}:${process.env.PATH}`, CAPTURE: capture,
-      NODE_OPTIONS: `--import=${preload}`, QUEBRAGALHO_BASE_URL: 'https://gateway.example', QUEBRAGALHO_API_KEY: 'test-secret', CLAUDE_CODE_USE_BEDROCK: '1', CODEX_HOME: '/official/codex', OPENCODE_CONFIG_DIR: '/official/opencode', OPENCODE_CONFIG: '/official/opencode.json', PI_CODING_AGENT_DIR: '/official/pi',
-      ANTHROPIC_BASE_URL: '', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_API_KEY: '', ANTHROPIC_MODEL: '',
-      CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '', OPENAI_API_BASE: '', OPENAI_API_KEY: '', OPENCODE_CONFIG_CONTENT: '' };
-    assert.equal((await run('sh', ['install.sh'], env)).code, 0);
-    const installed = join(dir, 'quebragalho');
-    const original = await readFile(installed, 'utf8');
-    assert.equal((await run('sh', ['install.sh'], env)).code, 1);
-    assert.equal(await readFile(installed, 'utf8'), original);
-    await rm(installed);
-    const missing = join(dir, 'missing');
-    await symlink(missing, installed);
-    assert.equal((await run('sh', ['install.sh'], env)).code, 1);
-    assert.equal(await readlink(installed), missing);
-    await rm(installed);
-    assert.equal((await run('sh', ['install.sh'], env)).code, 0);
-    assert.equal((await run(installed, ['--help'], env)).code, 0);
-    assert.deepEqual((await run(installed, ['list'], env)).output.trim().split('\n'), ['claude', 'codex', 'opencode', 'aider', 'pi']);
-    const result = await run(installed, ['launch', 'claude', '--model', 'model-b', '--', '-p', 'hello world; $(echo nope)'], env);
-    assert.equal(result.code, 7);
-    const claude = JSON.parse(await readFile(capture, 'utf8'));
-    assert.deepEqual(claude.args, ['--model', 'model-b', '-p', 'hello world; $(echo nope)']);
-    assert.equal(claude.base, env.QUEBRAGALHO_BASE_URL);
-    assert.equal(claude.token, 'test-secret');
-    assert.equal(claude.api, '');
-    assert.equal(claude.discovery, '1');
-    assert.equal(claude.bedrock, undefined);
-    assert.notEqual(claude.configDir, join(dir, 'home', '.claude'));
-    await assert.rejects(stat(claude.configDir), { code: 'ENOENT' });
-    assert.equal((await run(installed, ['launch', 'claude', '--model', 'model-b', '--', '--help'], env)).code, 7);
-    assert.deepEqual(JSON.parse(await readFile(capture, 'utf8')).args, ['--model', 'model-b', '--help']);
-    for (const harness of ['codex', 'opencode', 'aider', 'pi']) {
-      const launchEnv = harness === 'opencode' ? { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { official: { name: 'Official provider' } }, theme: 'existing' }) } : env;
-      const outcome = await run(installed, ['launch', harness, '--model', 'model-b', '--', '--help'], launchEnv);
-      assert.equal(outcome.code, 7, outcome.output);
-      const captured = JSON.parse(await readFile(capture, 'utf8'));
-      assert.equal(captured.args.at(-1), '--help');
-      assert.notEqual(captured.home, env.HOME);
-      assert.ok(captured.xdgConfig.startsWith(captured.home + '/'));
-      assert.ok(captured.xdgData.startsWith(captured.home + '/'));
-      await assert.rejects(stat(captured.home), { code: 'ENOENT' });
-      assert.ok(!captured.args.join(' ').includes('test-secret'));
-      if (harness === 'codex') {
-        assert.ok(captured.codexHome.startsWith(captured.home + '/'));
-        assert.ok(captured.args.includes('model_provider="quebragalho"'));
-        assert.ok(captured.args.includes('model_providers.quebragalho.wire_api="responses"'));
-        assert.ok(captured.args.includes('model_providers.quebragalho.env_key="QUEBRAGALHO_API_KEY"'));
-        assert.ok(captured.args.includes('model_providers.quebragalho.base_url="https://gateway.example/v1"'));
-      }
-      if (harness === 'opencode') {
-        assert.ok(captured.opencodeDir.startsWith(captured.home + '/'));
-        assert.equal(captured.opencodeFile, undefined);
-        const config = JSON.parse(captured.opencode);
-        assert.equal(config.model, 'quebragalho/model-b');
-        assert.deepEqual(config.provider.official, { name: 'Official provider' });
-        assert.equal(config.theme, 'existing');
-        assert.deepEqual(Object.keys(config.provider.quebragalho.models), ['model-a', 'model-b']);
-        assert.equal(config.provider.quebragalho.options.apiKey, '{env:QUEBRAGALHO_API_KEY}');
-      }
-      if (harness === 'aider') {
-        assert.equal(captured.openaiBase, 'https://gateway.example/v1');
-        assert.equal(captured.openaiKey, 'test-secret');
-        assert.deepEqual(captured.args.slice(0, 2), ['--model', 'openai/model-b']);
-        for (const flag of ['--config', '--env-file', '--input-history-file', '--chat-history-file', '--llm-history-file']) assert.ok(captured.args[captured.args.indexOf(flag) + 1].startsWith(captured.home + '/'));
-      }
-      if (harness === 'pi') {
-        assert.ok(captured.piDir.startsWith(captured.home + '/'));
-        let provider;
-        const extension = await import(`data:text/javascript,${encodeURIComponent(captured.extension)}`);
-        extension.default({ registerProvider: (name, value) => { assert.equal(name, 'quebragalho'); provider = value; } });
-        assert.equal(provider.apiKey, '$QUEBRAGALHO_API_KEY');
-        assert.equal(provider.api, 'openai-completions');
-        assert.equal(provider.models.length, 2);
-        await assert.rejects(readFile(captured.args[1]), { code: 'ENOENT' });
-      }
-    }
-    const signaled = await run(installed, ['launch', 'pi', '--model', 'model-b'], { ...env, MOCK_SIGNAL: '1' });
-    assert.equal(signaled.signal, 'SIGTERM');
-    const interrupted = JSON.parse(await readFile(capture, 'utf8'));
-    await assert.rejects(readFile(interrupted.args[1]), { code: 'ENOENT' });
-    await rm(capture);
-    const running = spawn(installed, ['launch', 'pi', '--model', 'model-b'], {
-      env: { ...process.env, ...env, MOCK_WAIT: '1' }, stdio: 'ignore',
-    });
-    try {
-      const closed = new Promise(resolve => running.on('close', (code, signal) => resolve({ code, signal })));
-      let active;
-      for (let i = 0; i < 100; i++) {
-        try { active = JSON.parse(await readFile(capture, 'utf8')); break; }
-        catch { await new Promise(resolve => setTimeout(resolve, 20)); }
-      }
-      assert.ok(active, 'Pi child started');
-      running.kill('SIGTERM');
-      assert.equal((await closed).signal, 'SIGTERM');
-      await assert.rejects(readFile(active.args[1]), { code: 'ENOENT' });
-    } finally { running.kill('SIGKILL'); }
-    await rm(join(dir, 'pi'));
-    assert.equal((await run(installed, ['launch', 'pi', '--model', 'model-b'], env)).code, 1);
-    for (const [args, overrides] of [
-      [['launch', 'claude'], {}],
-      [['launch', 'claude', '--model', 'missing'], {}],
-      [['launch', 'claude'], { QUEBRAGALHO_API_KEY: '' }],
-      [['launch', 'claude'], { QUEBRAGALHO_BASE_URL: 'http://example.com' }],
-      [['launch', 'bogus'], {}],
-      [['launch', 'claude'], { QUEBRAGALHO_BASE_URL: 'https://user:pass@gateway.example' }],
-      [['launch', 'claude', '--model', 'model-a'], { MOCK_NETWORK_ERROR: '1' }],
-      [['launch', 'claude', '--model', 'model-a'], { MOCK_BODY: '{"data":[]}' }],
-      [['launch', 'claude', '--model', 'model-a'], { MOCK_BODY: 'invalid JSON' }],
-    ]) {
-      const failure = await run(installed, args, { ...env, ...overrides });
-      assert.equal(failure.code, 1);
-      assert.ok(!failure.output.includes('test-secret'));
-    }
-    assert.equal((await run(installed, ['launch', 'claude', '--model', 'model-a'], { ...env, MOCK_STATUS: '401' })).code, 1);
-    for (const file of officialFiles) assert.equal(await readFile(join(dir, 'home', file), 'utf8'), 'official-provider-and-model');
-  } finally {
-    await rm(dir, { recursive: true, force: true });
+  const home = join(dir, 'home');
+  await mkdir(home);
+  const env = { HOME: home, QUEBRAGALHO_BIN_DIR: join(dir, 'bin'), QUEBRAGALHO_NO_PROMPT: '1', XDG_DATA_HOME: '', XDG_CONFIG_HOME: join(dir, 'xdg'), QUEBRAGALHO_VAULT: 'file', PATH: process.env.PATH };
+  return { dir, home, env, launcher: join(dir, 'bin', 'quebragalho'), app: join(home, '.local', 'share', 'quebragalho') };
+}
+
+const sourceFiles = async () => ['quebragalho.mjs', ...(await readdir(join(REPO, 'lib'))).filter(name => name.endsWith('.mjs')).map(name => `lib/${name}`)].sort();
+
+async function copySources(raw) {
+  await mkdir(raw);
+  for (const file of await sourceFiles()) { await mkdir(dirname(join(raw, file)), { recursive: true }); await cp(join(REPO, file), join(raw, file)); }
+}
+
+test('manifesto dos instaladores lista exatamente os arquivos do launcher', async () => {
+  const expected = await sourceFiles();
+  const shell = /^FILES='([^']+)'/m.exec(await readFile(join(REPO, 'install.sh'), 'utf8'))[1].split(' ').sort();
+  const powershell = [...(/\$files = ([^\n]+)/.exec(await readFile(join(REPO, 'install.ps1'), 'utf8'))[1]).matchAll(/'([^']+)'/g)].map(match => match[1]).sort();
+  assert.deepEqual(shell, expected);
+  assert.deepEqual(powershell, expected);
+  const ps1 = await readFile(join(REPO, 'install.ps1'));
+  assert.ok(ps1.every(byte => byte < 128), 'install.ps1 é ASCII puro (acentos como escapes)');
+  for (const file of ['install.sh', 'install.ps1', 'quebragalho.mjs', ...expected, 'README.md', 'docs/VALIDACAO.md']) {
+    const content = await readFile(join(REPO, file), 'utf8');
+    assert.ok(DASHES.every(dash => !content.includes(dash)), `${file} sem travessão`);
   }
 });
 
-test('Claude setup uses an isolated profile and leaves official models and providers intact', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'quebragalho-setup-test-'));
+test('install.sh de um clone instala, é idempotente e atualiza só o que é nosso', POSIX, async () => {
+  const { dir, env, launcher, app } = await installDirs();
   try {
-    const profile = join(dir, 'quebragalho', 'claude');
-    await mkdir(profile, { recursive: true });
-    const settings = join(profile, 'settings.json');
-    const official = join(dir, 'official');
-    await mkdir(official);
-    const officialSettings = join(official, 'settings.json');
-    await writeFile(officialSettings, '{"model":"sonnet","env":{"KEEP":"official"}}');
-    const original = JSON.stringify({ hooks: { Stop: [] }, permissions: { deny: ['Read(private)'] },
-      env: { KEEP: 'yes', ANTHROPIC_AUTH_TOKEN: 'old-token', CLAUDE_CODE_USE_BEDROCK: '1' } });
-    await writeFile(settings, original);
-    const preload = join(dir, 'setup-transport.mjs');
-    await writeFile(preload, `
-      import childProcess from 'node:child_process';
-      import { syncBuiltinESMExports } from 'node:module';
-      import assert from 'node:assert/strict';
-      import { writeFileSync } from 'node:fs';
-      let stored = false;
-      Object.defineProperty(process, 'platform', { value: 'darwin' });
-      childProcess.execFileSync = (command, args, options) => {
-        if (command === 'claude') return process.env.OLD_CLAUDE ? '2.1.100' : '2.1.286';
-        assert.equal(command, '/usr/bin/security');
-        assert.ok(!args.join(' ').includes('test-secret'));
-        if (process.env.KEYCHAIN_FAIL) throw new Error('test-secret');
-        if (args[0] === '-i') {
-          assert.ok(options.input.includes(Buffer.from('test-secret').toString('hex')));
-          assert.ok(!options.input.includes(' -U '));
-          stored = true;
-          writeFileSync(process.env.KEYCHAIN_CAPTURE, options.input.split(' -X ')[0]);
-          if (process.env.CONCURRENT_SETTINGS) writeFileSync(process.env.SETTINGS_PATH, '{"concurrent":true}');
-          return '';
-        }
-        if (!stored) throw new Error('Item not found');
-        return 'test-secret\\n';
-      };
-      syncBuiltinESMExports();
-      globalThis.fetch = async (url, options) => {
-        assert.equal(url, 'https://gateway.example/v1/models');
-        assert.equal(options.headers.Authorization, 'Bearer test-secret');
-        return new Response(JSON.stringify({data:[{id:'model-a'},{id:'gpt-6-luna'}]}),
-          {status: process.env.BAD_CATALOG ? 401 : 200});
-      };
-    `);
-    const env = { CLAUDE_CONFIG_DIR: official, XDG_CONFIG_HOME: dir, QUEBRAGALHO_BASE_URL: 'https://gateway.example',
-      QUEBRAGALHO_API_KEY: 'test-secret', NODE_OPTIONS: `--import=${preload}`, KEYCHAIN_CAPTURE: join(dir, 'keychain-capture'), SETTINGS_PATH: settings };
-    const setup = () => run('node', ['quebragalho.mjs', 'setup', 'claude'], env);
-    const result = await setup();
+    const first = await run('sh', ['install.sh'], env, { cwd: REPO });
+    assert.equal(first.code, 0, first.output);
+    assert.match(first.output, /Instalado em/);
+    assert.match(first.output, /Próximo passo: quebragalho login/);
+    assert.equal((await stat(launcher)).mode & 0o111, 0o111);
+    assert.ok((await readFile(launcher, 'utf8')).includes('quebragalho-installer:managed'));
+    assert.deepEqual((await readdir(app)).sort(), ['.managed', 'lib', 'quebragalho.mjs']);
+    assert.deepEqual((await readdir(dirname(app))).filter(name => name.startsWith('.quebragalho')), [], 'sem estágio nem backup');
+    assert.equal((await run(launcher, ['--help'], env)).code, 0);
+    assert.deepEqual((await run(launcher, ['list'], env)).output.trim().split('\n'), HARNESSES);
+    // Reinstalar atualiza: um arquivo adulterado volta ao original.
+    await writeFile(join(app, 'quebragalho.mjs'), '// adulterado\n');
+    await writeFile(join(app, 'lib', 'velho.mjs'), '// sobra de versão antiga\n');
+    const second = await run('sh', ['install.sh'], env, { cwd: REPO });
+    assert.equal(second.code, 0, second.output);
+    assert.equal(await readFile(join(app, 'quebragalho.mjs'), 'utf8'), await readFile(join(REPO, 'quebragalho.mjs'), 'utf8'));
+    await assert.rejects(stat(join(app, 'lib', 'velho.mjs')));
+    assert.equal((await run(launcher, ['list'], env)).code, 0);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('install.sh preserva arquivo alheio, link simbólico e diretório alheio', POSIX, async () => {
+  const { dir, env, launcher, app } = await installDirs();
+  try {
+    await mkdir(join(dir, 'bin'));
+    await writeFile(launcher, '#!/bin/sh\necho meu proprio quebragalho\n', { mode: 0o755 });
+    const alien = await run('sh', ['install.sh'], env, { cwd: REPO });
+    assert.equal(alien.code, 1);
+    assert.match(alien.output, /não é do Quebra-galho/);
+    assert.equal(await readFile(launcher, 'utf8'), '#!/bin/sh\necho meu proprio quebragalho\n');
+    await assert.rejects(stat(app), 'nada instalado quando o launcher é alheio');
+    await rm(launcher);
+    const missing = join(dir, 'missing');
+    await symlink(missing, launcher);
+    assert.equal((await run('sh', ['install.sh'], env, { cwd: REPO })).code, 1);
+    assert.equal(await readlink(launcher), missing);
+    await rm(launcher);
+    await mkdir(app, { recursive: true });
+    await writeFile(join(app, 'dados-do-usuario.txt'), 'meu');
+    const foreign = await run('sh', ['install.sh'], env, { cwd: REPO });
+    assert.equal(foreign.code, 1);
+    assert.match(foreign.output, /QUEBRAGALHO_HOME/);
+    assert.equal(await readFile(join(app, 'dados-do-usuario.txt'), 'utf8'), 'meu');
+    await assert.rejects(lstat(launcher));
+    await rm(join(app, 'dados-do-usuario.txt'));
+    assert.equal((await run('sh', ['install.sh'], env, { cwd: REPO })).code, 0, 'diretório vazio é aceito');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('install.sh substitui o launcher antigo de arquivo único, que era nosso', POSIX, async () => {
+  const { dir, env, launcher } = await installDirs();
+  try {
+    await mkdir(join(dir, 'bin'));
+    await writeFile(launcher, "#!/usr/bin/env node\nimport { spawn, execFileSync } from 'node:child_process';\nconst harnesses = ['claude', 'codex', 'opencode', 'aider', 'pi'];\n", { mode: 0o755 });
+    const result = await run('sh', ['install.sh'], env, { cwd: REPO });
     assert.equal(result.code, 0, result.output);
-    assert.ok(!result.output.includes('test-secret'));
-    const configured = JSON.parse(await readFile(settings, 'utf8'));
-    assert.deepEqual(configured.hooks, { Stop: [] });
-    assert.deepEqual(configured.permissions, { deny: ['Read(private)'] });
-    assert.equal(configured.env.KEEP, 'yes');
-    assert.equal(configured.env.ANTHROPIC_BASE_URL, 'https://gateway.example');
-    assert.equal(configured.env.ANTHROPIC_API_KEY, '');
-    assert.equal(configured.env.ANTHROPIC_AUTH_TOKEN, '');
-    assert.equal(configured.env.CLAUDE_CODE_USE_BEDROCK, '0');
-    assert.equal(configured.env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'gpt-6-luna');
-    assert.equal(configured.env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'gpt-6-luna');
-    assert.equal(configured.model, 'gpt-6-luna');
-    assert.deepEqual(configured.modelPicker.options.map(row => row.model), ['model-a', 'gpt-6-luna']);
-    assert.equal(configured.modelPicker.replaceBuiltInOptions, true);
-    assert.match(configured.apiKeyHelper, /^\/usr\/bin\/security find-generic-password /);
-    assert.ok(!(await readFile(settings, 'utf8')).includes('test-secret'));
-    assert.equal((await stat(settings)).mode & 0o777, 0o600);
-    const backups = (await readdir(profile)).filter(name => name.startsWith('settings.json.quebragalho-backup-'));
-    assert.equal(await readFile(join(profile, backups[0]), 'utf8'), original);
-    const firstAccount = await readFile(env.KEYCHAIN_CAPTURE, 'utf8');
-    const fakeClaude = join(dir, 'claude');
-    const shortcutCapture = join(dir, 'shortcut-capture.json');
-    await writeFile(fakeClaude, `#!/usr/bin/env node
-require('node:fs').writeFileSync(process.env.SHORTCUT_CAPTURE, JSON.stringify({configDir:process.env.CLAUDE_CONFIG_DIR,api:process.env.ANTHROPIC_API_KEY,args:process.argv.slice(2)}));
-`, { mode: 0o755 });
-    const shortcut = await run('node', ['quebragalho.mjs', 'claude', '-p', 'test'], {
-      ...env, NODE_OPTIONS: '', PATH: `${dir}:${process.env.PATH}`, SHORTCUT_CAPTURE: shortcutCapture, ANTHROPIC_API_KEY: 'official-token',
-    });
-    assert.equal(shortcut.code, 0, shortcut.output);
-    assert.deepEqual(JSON.parse(await readFile(shortcutCapture, 'utf8')), { configDir: profile, args: ['-p', 'test'] });
-    assert.equal(await readFile(officialSettings, 'utf8'), '{"model":"sonnet","env":{"KEEP":"official"}}');
-    configured.model = 'model-a';
-    await writeFile(settings, JSON.stringify(configured));
-    assert.equal((await setup()).code, 0);
-    assert.equal(JSON.parse(await readFile(settings, 'utf8')).model, 'model-a');
-    assert.equal(await readFile(env.KEYCHAIN_CAPTURE, 'utf8'), firstAccount);
-    for (const overrides of [{ KEYCHAIN_FAIL: '1' }, { BAD_CATALOG: '1' }, { OLD_CLAUDE: '1' }]) {
-      const before = await readFile(settings, 'utf8');
-      const failure = await run('node', ['quebragalho.mjs', 'setup', 'claude'], { ...env, ...overrides });
-      assert.equal(failure.code, 1);
-      assert.ok(!failure.output.includes('test-secret'));
-      assert.equal(await readFile(settings, 'utf8'), before);
+    assert.ok((await readFile(launcher, 'utf8')).includes('quebragalho-installer:managed'));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('Given curl | sh sem clone Then baixa só os arquivos do launcher e instala; funciona com espaços e aspas no caminho', POSIX, async () => {
+  const { dir, env } = await installDirs();
+  try {
+    const raw = join(dir, 'raw');
+    await copySources(raw);
+    const spaced = join(dir, "pasta com 'aspas'", 'bin');
+    const remote = { ...env, QUEBRAGALHO_BIN_DIR: spaced, QUEBRAGALHO_HOME: join(dir, 'app dir'), QUEBRAGALHO_RAW_URL: pathToFileURL(raw).href };
+    const script = await readFile(join(REPO, 'install.sh'), 'utf8');
+    const piped = await run('sh', [], remote, { input: script, cwd: dir });
+    assert.equal(piped.code, 0, piped.output);
+    const listed = await run(join(spaced, 'quebragalho'), ['list'], remote);
+    assert.deepEqual(listed.output.trim().split('\n'), HARNESSES, listed.output);
+    assert.deepEqual((await readdir(join(dir, 'app dir'))).sort(), ['.managed', 'lib', 'quebragalho.mjs']);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('Given download que falha no meio Then aborta sem launcher, sem app e sem arquivo parcial', POSIX, async () => {
+  const { dir, env, home } = await installDirs();
+  try {
+    const raw = join(dir, 'raw');
+    await copySources(raw);
+    await rm(join(raw, 'lib', 'vault.mjs'));
+    const script = await readFile(join(REPO, 'install.sh'), 'utf8');
+    const remote = { ...env, QUEBRAGALHO_RAW_URL: pathToFileURL(raw).href };
+    const failed = await run('sh', [], remote, { input: script, cwd: dir });
+    assert.equal(failed.code, 1);
+    assert.match(failed.output, /Falha ao baixar lib\/vault\.mjs; nada foi instalado/);
+    await assert.rejects(lstat(join(dir, 'bin', 'quebragalho')));
+    const share = join(home, '.local', 'share');
+    assert.deepEqual(await readdir(share), [], 'nem diretório de estágio sobrou');
+    assert.deepEqual(await readdir(join(dir, 'bin')), [], 'nem wrapper temporário');
+    await writeFile(join(raw, 'lib', 'vault.mjs'), '');
+    const empty = await run('sh', [], remote, { input: script, cwd: dir });
+    assert.equal(empty.code, 1);
+    assert.match(empty.output, /Arquivo vazio: lib\/vault\.mjs/);
+    assert.deepEqual(await readdir(share), []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('install.sh recusa Node antigo e ausente', POSIX, async () => {
+  const { dir, env } = await installDirs();
+  try {
+    const bin = join(dir, 'fakebin');
+    await mkdir(bin);
+    await writeFile(join(bin, 'node'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const old = await run('/bin/sh', ['install.sh'], { ...env, PATH: `${bin}:/usr/bin:/bin` }, { cwd: REPO });
+    assert.equal(old.code, 1);
+    assert.match(old.output, /Requer Node\.js 22\+/);
+    const none = await run('/bin/sh', ['install.sh'], { ...env, PATH: '/nao-existe' }, { cwd: REPO });
+    assert.equal(none.code, 1);
+    assert.match(none.output, /Instale Node\.js 22\+/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+const PRELOAD = `
+  globalThis.fetch = async (url, options = {}) => {
+    const { pathname } = new URL(url);
+    if (process.env.MOCK_NETWORK_ERROR) throw new TypeError('test-secret');
+    if (pathname === '/v1/models') {
+      if (options.headers?.Authorization !== 'Bearer test-secret') return new Response('{}', { status: 401 });
+      return new Response(process.env.MOCK_BODY || JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }] }), { status: Number(process.env.MOCK_STATUS || 200) });
     }
-    const concurrent = await run('node', ['quebragalho.mjs', 'setup', 'claude'], { ...env, CONCURRENT_SETTINGS: '1' });
-    assert.equal(concurrent.code, 1);
-    assert.equal(await readFile(settings, 'utf8'), '{"concurrent":true}');
-    const otherDir = join(dir, 'other-profile');
-    const other = await run('node', ['quebragalho.mjs', 'setup', 'claude'], { ...env, XDG_CONFIG_HOME: otherDir });
-    assert.equal(other.code, 0, other.output);
-    assert.notEqual(JSON.parse(await readFile(join(otherDir, 'quebragalho', 'claude', 'settings.json'), 'utf8')).apiKeyHelper, configured.apiKeyHelper);
-    assert.notEqual(await readFile(env.KEYCHAIN_CAPTURE, 'utf8'), firstAccount);
-    assert.equal(await readFile(officialSettings, 'utf8'), '{"model":"sonnet","env":{"KEEP":"official"}}');
-    await writeFile(settings, 'invalid JSON');
-    assert.equal((await setup()).code, 1);
-    assert.equal(await readFile(settings, 'utf8'), 'invalid JSON');
+    if (pathname === '/v1/balance') return new Response(JSON.stringify({ currency: 'BRL', available: '10.00', default: '10', bonus: '0' }), { status: 200 });
+    return new Response('{}', { status: 400 });
+  };
+`;
+const FAKE = `#!/usr/bin/env node
+const fs = require('node:fs'); const e = process.env; const args = process.argv.slice(2);
+fs.writeFileSync(e.CAPTURE, JSON.stringify({ args, home: e.HOME, configDir: e.CLAUDE_CONFIG_DIR, token: e.ANTHROPIC_AUTH_TOKEN }));
+if (e.MOCK_SIGNAL) process.kill(process.pid, 'SIGTERM'); else if (e.MOCK_WAIT) setInterval(() => {}, 1000); else process.exit(7);
+`;
+
+test('launcher instalado: argumentos literais, código de saída, sinais, limpeza e erros sem vazar a chave', POSIX, async () => {
+  const { dir, env, launcher, home } = await installDirs();
+  try {
+    assert.equal((await run('sh', ['install.sh'], env, { cwd: REPO })).code, 0);
+    const preload = join(dir, 'transport.mjs');
+    await writeFile(preload, PRELOAD);
+    const fakeBin = join(dir, 'fakebin');
+    await mkdir(fakeBin);
+    for (const name of HARNESSES) await writeFile(join(fakeBin, name), FAKE, { mode: 0o755 });
+    const official = join(home, '.claude', 'settings.json');
+    await mkdir(dirname(official), { recursive: true });
+    await writeFile(official, 'configuração-oficial');
+    const capture = join(dir, 'capture.json');
+    const full = { ...env, PATH: `${fakeBin}:${process.env.PATH}`, CAPTURE: capture, NODE_OPTIONS: `--import=${preload}`, QUEBRAGALHO_API_KEY: 'test-secret' };
+    const result = await run(launcher, ['launch', 'claude', '--model', 'model-b', '--', '-p', 'hello world; $(echo nope)'], full);
+    assert.equal(result.code, 7, result.output);
+    const captured = JSON.parse(await readFile(capture, 'utf8'));
+    assert.deepEqual(captured.args, ['--model', 'model-b', '-p', 'hello world; $(echo nope)']);
+    assert.equal(captured.token, 'test-secret');
+    await assert.rejects(stat(captured.home), { code: 'ENOENT' });
+    const signaled = await run(launcher, ['launch', 'pi', '--model', 'model-b'], { ...full, MOCK_SIGNAL: '1' });
+    assert.equal(signaled.signal, 'SIGTERM');
+    await assert.rejects(stat(JSON.parse(await readFile(capture, 'utf8')).home), { code: 'ENOENT' });
+    await rm(capture);
+    const running = spawn(launcher, ['launch', 'pi', '--model', 'model-b'], { env: { ...process.env, ...full, MOCK_WAIT: '1' }, stdio: 'ignore' });
+    try {
+      const closed = new Promise(resolve => running.on('close', (code, signal) => resolve({ code, signal })));
+      let active;
+      for (let i = 0; i < 150 && !active; i++) {
+        try { active = JSON.parse(await readFile(capture, 'utf8')); } catch { await new Promise(resolve => setTimeout(resolve, 40)); }
+      }
+      assert.ok(active, 'o harness iniciou');
+      running.kill('SIGTERM');
+      assert.equal((await closed).signal, 'SIGTERM');
+      await assert.rejects(stat(active.home), { code: 'ENOENT' });
+    } finally { running.kill('SIGKILL'); }
+    for (const [args, overrides] of [
+      [['launch', 'claude'], {}], [['launch', 'claude', '--model', 'missing'], {}], [['launch', 'claude'], { QUEBRAGALHO_API_KEY: '' }],
+      [['launch', 'claude'], { QUEBRAGALHO_BASE_URL: 'http://example.com' }], [['launch', 'bogus'], {}],
+      [['launch', 'claude'], { QUEBRAGALHO_BASE_URL: 'https://user:pass@gateway.example' }],
+      [['launch', 'claude', '--model', 'model-a'], { MOCK_NETWORK_ERROR: '1' }], [['launch', 'claude', '--model', 'model-a'], { MOCK_BODY: '{"data":[]}' }],
+      [['launch', 'claude', '--model', 'model-a'], { MOCK_BODY: 'invalid JSON' }], [['launch', 'claude', '--model', 'model-a'], { MOCK_STATUS: '401' }],
+      [['launch', 'claude', '--model', 'model-a'], { PATH: dirname(process.execPath) }],
+    ]) {
+      const failure = await run(launcher, args, { ...full, ...overrides });
+      assert.equal(failure.code, 1, `${args.join(' ')} ${JSON.stringify(overrides)}: ${failure.output}`);
+      assert.ok(!failure.output.includes('test-secret'));
+    }
+    assert.equal(await readFile(official, 'utf8'), 'configuração-oficial');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('smoke de CI: --help, list e doctor --json funcionam sem rede nem chave', POSIX, async () => {
+  const { dir, env, launcher } = await installDirs();
+  try {
+    assert.equal((await run('sh', ['install.sh'], env, { cwd: REPO })).code, 0);
+    const preload = join(dir, 'offline.mjs');
+    await writeFile(preload, "globalThis.fetch = async () => { throw new TypeError('offline'); };\n");
+    const offline = { ...env, NODE_OPTIONS: `--import=${preload}` };
+    assert.equal((await run(launcher, ['--help'], offline)).code, 0);
+    assert.deepEqual((await run(launcher, ['list'], offline)).output.trim().split('\n'), HARNESSES);
+    const doctor = await run(launcher, ['doctor', '--json'], offline);
+    assert.equal(doctor.code, 0, doctor.output);
+    const report = JSON.parse(doctor.output);
+    assert.equal(report.ok, true);
+    assert.ok(report.checks.some(check => check.id === 'node' && check.status === 'ok'));
+    assert.match(report.checks.find(check => check.id === 'path').detail, /launcher/);
+    const unknown = await run(launcher, ['nada'], offline);
+    assert.equal(unknown.code, 1);
+    assert.match(unknown.output, /Comando desconhecido/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('Windows real: .cmd com argumentos hostis chega intacto (só roda no Windows)', { skip: process.platform !== 'win32' }, async () => {
+  const { spawnPlan } = await import('./lib/proc.mjs');
+  const dir = await mkdtemp(join(tmpdir(), 'qg win espaço-'));
+  try {
+    await writeFile(join(dir, 'dump.mjs'), "import { writeFileSync } from 'node:fs'; writeFileSync(process.env.DUMP, JSON.stringify(process.argv.slice(2)));\n");
+    await writeFile(join(dir, 'tool.cmd'), '@echo off\r\nnode "%~dp0dump.mjs" %*\r\n');
+    const args = ['simples', 'com espaço', 'aspas "duplas"', 'a&b', 'a|b', '100%', '%PATH%', '^caret', 'a<b>c', '(x)', 'fim\\', '\\"', '"& calc.exe &"', '', '!var!', 'ç é ã'];
+    const dump = join(dir, 'out.json');
+    const plan = spawnPlan(join(dir, 'tool.cmd'), args, { env: process.env, platform: 'win32' });
+    const result = await new Promise(resolve => spawn(plan.command, plan.args, { ...plan.options, env: { ...process.env, DUMP: dump }, stdio: 'ignore', shell: false }).on('close', resolve));
+    assert.equal(result, 0);
+    assert.deepEqual(JSON.parse(await readFile(dump, 'utf8')), args);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('Windows real: DPAPI guarda e lê (só roda no Windows)', { skip: process.platform !== 'win32' }, async () => {
+  const { createContext } = await import('./lib/context.mjs');
+  const dir = await mkdtemp(join(tmpdir(), 'qg-dpapi-'));
+  try {
+    const ctx = createContext({ env: { ...process.env, APPDATA: dir } });
+    await ctx.vault.set('dev.quebragalho.cli', 'teste', 'segredo-de-teste');
+    assert.equal(await ctx.vault.get('dev.quebragalho.cli', 'teste'), 'segredo-de-teste');
+    await ctx.vault.remove('dev.quebragalho.cli', 'teste');
+    assert.equal(await ctx.vault.get('dev.quebragalho.cli', 'teste'), undefined);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

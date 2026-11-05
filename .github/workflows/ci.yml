@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Testes (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - name: Sintaxe do Node
+        shell: bash
+        run: |
+          node --check quebragalho.mjs
+          for file in lib/*.mjs; do node --check "$file"; done
+      - name: Sintaxe do install.sh
+        shell: bash
+        run: sh -n install.sh
+      - name: Análise do install.ps1 (PowerShell 7)
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'install.ps1'), [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Host "install.ps1:$($_.Extent.StartLineNumber): $($_.Message)" }; exit 1 }
+          Write-Host 'install.ps1 sem erros de sintaxe'
+      - name: Análise do install.ps1 (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'install.ps1'), [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Host "install.ps1:$($_.Extent.StartLineNumber): $($_.Message)" }; exit 1 }
+          Write-Host 'install.ps1 sem erros de sintaxe (5.1)'
+
+  install:
+    name: Instalação real (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['22', '24']
+    env:
+      QUEBRAGALHO_NO_PROMPT: '1'
+      QUEBRAGALHO_NO_MODIFY_PATH: '1'
+      QUEBRAGALHO_VAULT: file
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Instalar e usar (macOS, Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          export QUEBRAGALHO_BIN_DIR="$RUNNER_TEMP/qg bin"
+          export QUEBRAGALHO_HOME="$RUNNER_TEMP/qg home"
+          sh install.sh
+          sh install.sh
+          "$QUEBRAGALHO_BIN_DIR/quebragalho" --help
+          "$QUEBRAGALHO_BIN_DIR/quebragalho" list
+          "$QUEBRAGALHO_BIN_DIR/quebragalho" list --json
+          "$QUEBRAGALHO_BIN_DIR/quebragalho" doctor --json
+      - name: Instalar com Windows PowerShell 5.1
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:QUEBRAGALHO_BIN_DIR = Join-Path $env:RUNNER_TEMP 'qg bin'
+          .\install.ps1
+          if (-not (Test-Path (Join-Path $env:QUEBRAGALHO_BIN_DIR 'quebragalho.cmd'))) { throw 'quebragalho.cmd não foi criado' }
+      - name: Reinstalar com PowerShell 7 e usar no PowerShell
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:QUEBRAGALHO_BIN_DIR = Join-Path $env:RUNNER_TEMP 'qg bin'
+          .\install.ps1
+          $launcher = Join-Path $env:QUEBRAGALHO_BIN_DIR 'quebragalho.cmd'
+          foreach ($arguments in @(@('--help'), @('list'), @('list', '--json'), @('doctor', '--json'))) {
+            & $launcher @arguments
+            if ($LASTEXITCODE -ne 0) { throw "quebragalho $($arguments -join ' ') saiu com $LASTEXITCODE" }
+          }
+      - name: Usar no cmd.exe
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          "%RUNNER_TEMP%\qg bin\quebragalho.cmd" --help || exit /b 1
+          "%RUNNER_TEMP%\qg bin\quebragalho.cmd" list || exit /b 1
+          "%RUNNER_TEMP%\qg bin\quebragalho.cmd" doctor --json || exit /b 1
