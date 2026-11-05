@@ -5,8 +5,10 @@
 #            QUEBRAGALHO_NO_MODIFY_PATH=1 (nao altera o PATH), QUEBRAGALHO_RAW_URL (origem dos arquivos).
 # Este arquivo e so ASCII de proposito: os acentos das mensagens vao como \uXXXX e viram texto em Msg,
 # para funcionar igual em "irm | iex" e em "-File" no PowerShell 5.1, com ou sem BOM.
-# Tudo fica dentro de uma funcao: nao usamos "exit", que fecharia o terminal de quem roda "| iex".
+# Tudo fica dentro de um bloco "& { ... }" com funcoes: nada vaza para a sessao de quem roda "| iex"
+# (por exemplo, a funcao Msg esconderia o msg.exe) e nao usamos "exit", que fecharia o terminal.
 
+& {
 function Msg([string]$text) { [regex]::Unescape($text) }
 
 function Install-Quebragalho {
@@ -24,6 +26,7 @@ function Install-Quebragalho {
   if ([int]$version.Split('.')[0] -lt 22) { throw (Msg 'quebragalho: requer Node.js 22+.') }
 
   $localAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME 'AppData\Local' }
+  if ($env:QUEBRAGALHO_BIN_DIR -and $env:QUEBRAGALHO_BIN_DIR -notmatch '^([A-Za-z]:[\\/]|\\\\)') { throw (Msg 'quebragalho: QUEBRAGALHO_BIN_DIR deve ser um caminho absoluto.') }
   $binDir = if ($env:QUEBRAGALHO_BIN_DIR) { $env:QUEBRAGALHO_BIN_DIR } else { Join-Path $localAppData 'Programs\quebragalho' }
   $appDir = Join-Path $binDir 'quebragalho-app'
   $launcher = Join-Path $binDir 'quebragalho.cmd'
@@ -91,17 +94,24 @@ function Add-ToUserPath([string]$directory) {
   $normalize = { param($p) [Environment]::ExpandEnvironmentVariables($p).TrimEnd('\').ToLowerInvariant() }
   if (-not ($env:Path.Split(';') | Where-Object { $_ -and ((& $normalize $_) -eq (& $normalize $directory)) })) { $env:Path = "$env:Path;$directory" }
   if ($env:QUEBRAGALHO_NO_MODIFY_PATH) { Write-Host ((Msg 'Adicione {0} ao PATH para usar o comando quebragalho.') -f $directory); return }
-  $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
   try {
-    $current = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-    $entries = @($current.Split(';') | Where-Object { $_ })
-    if ($entries | Where-Object { (& $normalize $_) -eq (& $normalize $directory) }) { return }
-    $key.SetValue('Path', (($entries + $directory) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    try {
+      $current = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+      $entries = @($current.Split(';') | Where-Object { $_ })
+      if ($entries | Where-Object { (& $normalize $_) -eq (& $normalize $directory) }) { return }
+      $key.SetValue('Path', (($entries + $directory) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    }
+    finally { if ($key) { $key.Close() } }
+    # Avisa o Windows da mudanca (variavel descartavel) para novos terminais enxergarem o PATH.
+    [Environment]::SetEnvironmentVariable('QUEBRAGALHO_NOTIFY', '1', 'User')
+    [Environment]::SetEnvironmentVariable('QUEBRAGALHO_NOTIFY', $null, 'User')
   }
-  finally { $key.Close() }
-  # Avisa o Windows da mudanca (variavel descartavel) para novos terminais enxergarem o PATH.
-  [Environment]::SetEnvironmentVariable('QUEBRAGALHO_NOTIFY', '1', 'User')
-  [Environment]::SetEnvironmentVariable('QUEBRAGALHO_NOTIFY', $null, 'User')
+  catch {
+    # A instalacao ja esta pronta: o PATH falhou, mas os proximos passos continuam.
+    Write-Host ((Msg 'N\u00e3o foi poss\u00edvel gravar o PATH do usu\u00e1rio ({0}). Adicione {1} ao PATH manualmente (Configura\u00e7\u00f5es do Windows, Vari\u00e1veis de ambiente) para usar o comando quebragalho.') -f $_.Exception.Message, $directory)
+    return
+  }
   Write-Host ((Msg 'PATH do usu\u00e1rio atualizado com {0}. Abra um novo terminal para usar o comando quebragalho.') -f $directory)
 }
 
@@ -125,3 +135,4 @@ function Show-NextSteps([string]$launcher) {
 }
 
 Install-Quebragalho
+}

@@ -109,3 +109,15 @@ test('install.ps1: launcher .cmd desliga a busca no diretório atual; PATH, link
   }
   assert.ok(!/^\s*exit\b/m.test(script), 'sem exit: fecharia o terminal de quem usa irm | iex');
 });
+
+test('install.ps1: bloco & { } isola funções, QUEBRAGALHO_BIN_DIR relativo é recusado e falha de PATH não interrompe', async () => {
+  const script = await readFile(join(REPO, 'install.ps1'), 'utf8');
+  const code = script.split('\n').filter(line => !line.startsWith('#')).join('\n');
+  assert.match(code.trimStart(), /^& \{\nfunction Msg/, 'tudo dentro de & { }');
+  assert.match(code.trimEnd(), /Install-Quebragalho\n\}$/, 'o bloco fecha depois da chamada');
+  assert.ok(script.includes("QUEBRAGALHO_BIN_DIR -notmatch") || script.includes('QUEBRAGALHO_BIN_DIR -and'), 'valida caminho absoluto');
+  assert.ok(script.includes('QUEBRAGALHO_BIN_DIR deve ser um caminho absoluto'));
+  const path = script.slice(script.indexOf('function Add-ToUserPath'), script.indexOf('function Show-NextSteps'));
+  assert.ok(/catch \{[\s\S]*Adicione \{1\} ao PATH manualmente[\s\S]*return[\s\S]*\}/.test(path), 'falha no registro vira instrução manual');
+  assert.ok(path.indexOf('OpenSubKey') > path.indexOf('try {'), 'abrir o registro está dentro do try');
+});

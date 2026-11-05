@@ -28,6 +28,21 @@ Fatos do gateway informados pelo mantenedor em 05/11/2026 (não reconferidos nes
 - Claude Code, Codex, OpenCode, Aider e Pi reais com esta versão do launcher.
 - Codex: continua dependendo de `/v1/responses` no gateway; o launcher não traduz protocolo.
 
+**Passos de CI adicionados em 05/11/2026 (escritos e com o YAML validado pelo actionlint; ainda sem execução, então não contam como verificados até o CI rodar):**
+
+- Windows, em PowerShell 5.1 e em PowerShell 7: `Get-Content install.ps1 -Raw | iex` baixando de `QUEBRAGALHO_RAW_URL` (o commit do evento) em diretório temporário, sem `QUEBRAGALHO_NO_MODIFY_PATH`; confere que `HKCU\Environment\Path` recebeu o diretório, que a função `Msg` não vazou para a sessão, roda `quebragalho.cmd --help` e `doctor --json` e restaura o PATH original.
+- Linux e macOS: `curl | sh` do `install.sh` na mesma origem, em diretório temporário, com `--help` e `doctor --json`.
+- Windows: gravação e leitura de um valor fictício no cofre DPAPI real, a partir de um passo `pwsh` (cobre o `powershell.exe` 5.1 chamado pelo PowerShell 7).
+
+**Verificado por testes automatizados no macOS nesta rodada:**
+
+- Aider: variáveis `AIDER_*`, `OPENAI_ORGANIZATION` e `OPENAI_API_VERSION` herdadas são removidas, e a chave não vai em argumento.
+- Claude: todo `ANTHROPIC_*` e `CLAUDE_CODE_USE_*` herdado é removido, e os modelos padrão (Sonnet, Opus, Haiku e pequeno/rápido) apontam para o modelo escolhido. `quebragalho claude` não repassa `QUEBRAGALHO_API_KEY`.
+- `install.ps1`: bloco `& { }`, `QUEBRAGALHO_BIN_DIR` relativo recusado e falha de PATH com instrução manual, conferidos só por texto (o PowerShell não roda aqui).
+- Encerramento no Windows: `killTree` chama `taskkill /T /F /PID` pelo caminho absoluto em `SystemRoot`, sem shell, testado com executor simulado. O efeito real (encerrar o harness neto de um `.cmd`) não foi exercitado em Windows.
+
+**Limitação conhecida:** o isolamento de `HOME` das sessões `launch` faz o harness não enxergar o `~/.gitconfig` do usuário (identidade e configurações do Git). Já era assim antes desta rodada; use configuração do Git por repositório ou variáveis `GIT_*` se precisar.
+
 ## 30/09/2026 e 01/10/2026: versão anterior (arquivo único, macOS e Linux)
 
 Resultados da versão anterior, mantidos como histórico. Não foram repetidos com a versão multiplataforma.

@@ -69,6 +69,8 @@ jobs:
       QUEBRAGALHO_NO_PROMPT: '1'
       QUEBRAGALHO_NO_MODIFY_PATH: '1'
       QUEBRAGALHO_VAULT: file
+      # Commit exato deste evento (no pull_request, a ponta da branch, não o merge temporário).
+      QUEBRAGALHO_RAW_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -114,3 +116,86 @@ jobs:
           "%RUNNER_TEMP%\qg bin\quebragalho.cmd" --help || exit /b 1
           "%RUNNER_TEMP%\qg bin\quebragalho.cmd" list || exit /b 1
           "%RUNNER_TEMP%\qg bin\quebragalho.cmd" doctor --json || exit /b 1
+      - name: Instalar por irm | iex e conferir o PATH (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path $env:RUNNER_TEMP ('qg-iex-' + [guid]::NewGuid().ToString('N'))
+          $env:QUEBRAGALHO_BIN_DIR = $bin
+          Remove-Item Env:QUEBRAGALHO_NO_MODIFY_PATH -ErrorAction SilentlyContinue
+          $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+          $had = @($key.GetValueNames()) -contains 'Path'
+          $original = if ($had) { $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+          $kind = if ($had) { $key.GetValueKind('Path') }
+          $key.Close()
+          try {
+            Get-Content install.ps1 -Raw | iex
+            if (Get-Command Msg -CommandType Function -ErrorAction SilentlyContinue) { throw 'A função Msg vazou para a sessão.' }
+            $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+            $stored = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $key.Close()
+            if (-not ($stored.Split(';') | Where-Object { $_.TrimEnd('\') -ieq $bin })) { throw "O PATH do usuário no registro não tem $bin" }
+            $launcher = Join-Path $bin 'quebragalho.cmd'
+            foreach ($arguments in @(@('--help'), @('doctor', '--json'))) {
+              & $launcher @arguments
+              if ($LASTEXITCODE -ne 0) { throw "quebragalho $($arguments -join ' ') saiu com $LASTEXITCODE" }
+            }
+          }
+          finally {
+            $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+            if ($had) { $key.SetValue('Path', $original, $kind) } else { $key.DeleteValue('Path', $false) }
+            $key.Close()
+            Remove-Item -LiteralPath $bin -Recurse -Force -ErrorAction SilentlyContinue
+          }
+      - name: Instalar por irm | iex e conferir o PATH (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path $env:RUNNER_TEMP ('qg-iex-' + [guid]::NewGuid().ToString('N'))
+          $env:QUEBRAGALHO_BIN_DIR = $bin
+          Remove-Item Env:QUEBRAGALHO_NO_MODIFY_PATH -ErrorAction SilentlyContinue
+          $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+          $had = @($key.GetValueNames()) -contains 'Path'
+          $original = if ($had) { $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+          $kind = if ($had) { $key.GetValueKind('Path') }
+          $key.Close()
+          try {
+            Get-Content install.ps1 -Raw | iex
+            if (Get-Command Msg -CommandType Function -ErrorAction SilentlyContinue) { throw 'A função Msg vazou para a sessão.' }
+            $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+            $stored = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $key.Close()
+            if (-not ($stored.Split(';') | Where-Object { $_.TrimEnd('\') -ieq $bin })) { throw "O PATH do usuário no registro não tem $bin" }
+            $launcher = Join-Path $bin 'quebragalho.cmd'
+            foreach ($arguments in @(@('--help'), @('doctor', '--json'))) {
+              & $launcher @arguments
+              if ($LASTEXITCODE -ne 0) { throw "quebragalho $($arguments -join ' ') saiu com $LASTEXITCODE" }
+            }
+          }
+          finally {
+            $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+            if ($had) { $key.SetValue('Path', $original, $kind) } else { $key.DeleteValue('Path', $false) }
+            $key.Close()
+            Remove-Item -LiteralPath $bin -Recurse -Force -ErrorAction SilentlyContinue
+          }
+      - name: Instalar por curl | sh (macOS, Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          export QUEBRAGALHO_BIN_DIR="$RUNNER_TEMP/qg curl bin"
+          export QUEBRAGALHO_HOME="$RUNNER_TEMP/qg curl home"
+          curl -fsSL "$QUEBRAGALHO_RAW_URL/install.sh" | sh
+          "$QUEBRAGALHO_BIN_DIR/quebragalho" --help
+          "$QUEBRAGALHO_BIN_DIR/quebragalho" doctor --json
+          rm -rf "$QUEBRAGALHO_BIN_DIR" "$QUEBRAGALHO_HOME"
+      - name: Cofre DPAPI a partir do PowerShell 7
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:APPDATA = Join-Path $env:RUNNER_TEMP 'qg-appdata'
+          Remove-Item Env:QUEBRAGALHO_VAULT -ErrorAction SilentlyContinue
+          node .github/scripts/dpapi-roundtrip.mjs
+          if ($LASTEXITCODE -ne 0) { throw "dpapi-roundtrip saiu com $LASTEXITCODE" }
